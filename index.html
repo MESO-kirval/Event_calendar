@@ -1292,7 +1292,28 @@ async function loadEventsFromSheet() {
   let currentView  = "calendar";
 
   const allDisciplineKeys = ["cs2","dota2","valorant","efootball","lol","football","projectd","other"];
-  let activeDisciplines = new Set(allDisciplineKeys);
+
+const projectDLegendBtn = document.querySelector('#disciplineFilter [data-disc="projectd"]');
+
+// Показывать ли Project D (админ или клиент)
+function updateProjectDVisibility() {
+  if (!projectDLegendBtn) return;
+
+  const canSeeProjectD = isAdmin || isClient;
+
+  if (canSeeProjectD) {
+    projectDLegendBtn.style.display = "inline-flex";
+    activeDisciplines.add("projectd");
+  } else {
+    projectDLegendBtn.style.display = "none";
+    activeDisciplines.delete("projectd");
+  }
+
+  // перерисовать календарь с актуальным набором дисциплин
+  renderCalendar();
+}
+
+let activeDisciplines = new Set(allDisciplineKeys);
 
   let ganttRangeMode = "month";
   let ganttDayWidth  = 26;
@@ -1442,11 +1463,14 @@ async function loadEventsFromSheet() {
   loginCancelBtn.addEventListener("click", closeLoginModal);
 
   // === Аутентификация на фронте ===
-  let authToken = localStorage.getItem("calendarAuthToken") || null;
-  let userRole  = localStorage.getItem("calendarUserRole") || null; // 'admin' / 'client' / null
-  let isAdmin   = (userRole === "admin"); 
+let authToken = localStorage.getItem("calendarAuthToken") || null;
+let userRole  = localStorage.getItem("calendarUserRole") || null; // 'admin' / 'client' / null
+let isAdmin   = (userRole === "admin");
+let isClient  = (userRole === "client");
 
-  function updateAdminUI() {
+updateAdminUI(); // внутри обновится и видимость Project D
+
+function updateAdminUI() {
   if (!adminActionBtn) return;
 
   if (userRole === "admin") {
@@ -1456,15 +1480,19 @@ async function loadEventsFromSheet() {
   } else {
     adminActionBtn.textContent = "Вход в админку";
   }
+
+  // здесь же прячем/показываем кнопку Project D
+  updateProjectDVisibility();
 }
 
   function handleUnauthorized() {
   authToken = null;
   userRole  = null;
   isAdmin   = false;
+  isClient  = false;
   localStorage.removeItem("calendarAuthToken");
   localStorage.removeItem("calendarUserRole");
-  updateAdminUI();
+  updateAdminUI(); // внутри спрячется Project D
   openLoginModal("Сессия истекла. Войдите заново.");
 }
 
@@ -1511,17 +1539,18 @@ async function loadEventsFromSheet() {
       return;
     }
     authToken = data.token;
-    userRole  = data.role || "admin"; // по умолчанию admin, если что-то пойдёт не так
-    isAdmin   = (userRole === "admin");
+userRole  = data.role || "admin"; // по умолчанию admin, если что-то пойдёт не так
+isAdmin   = (userRole === "admin");
+isClient  = (userRole === "client");
 
-    localStorage.setItem("calendarAuthToken", authToken);
-    localStorage.setItem("calendarUserRole",  userRole);
+localStorage.setItem("calendarAuthToken", authToken);
+localStorage.setItem("calendarUserRole",  userRole);
 
-    updateAdminUI();
-    closeLoginModal();
+updateAdminUI(); // покажет Project D, если нужно
+closeLoginModal();
 
-    // После логина перезагружаем события, чтобы появились Project D
-    loadEventsFromSheet();
+// После логина перезагружаем события, чтобы появились Project D
+loadEventsFromSheet();
 
     } catch (err) {
       setLoginError("Ошибка: " + err.message);
@@ -1531,12 +1560,16 @@ async function loadEventsFromSheet() {
   });
 
   adminActionBtn.addEventListener("click", () => {
-    if (!isAdmin) {
-      openLoginModal();
-    } else {
-      openEventModal("create");
-    }
-  });
+  if (!isAdmin && !isClient) {
+    // гость -> логин
+    openLoginModal();
+  } else if (isAdmin) {
+    // админ -> создать событие
+    openEventModal("create");
+  } else {
+    // client: только просмотр Project D, ничего не открываем
+  }
+});
 
   // === Синхронизация событий с бэком (create/update/delete, только для админа) ===
   async function syncEventWithSheet(payloadBase) {
