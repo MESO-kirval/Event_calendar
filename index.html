@@ -145,7 +145,57 @@
       gap: 10px;
       flex: 1;
       min-height: 0;
+      position: relative;
     }
+
+    .loading-overlay {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: radial-gradient(circle at top, rgba(15,23,42,0.96), #020617 110%);
+  font-size: 13px;
+  color: var(--text-muted);
+  z-index: 50;
+  pointer-events: none;
+}
+
+.loading-overlay--hidden {
+  display: none;
+}
+
+.loading-inner {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+}
+
+.loading-spinner {
+  width: 32px;
+  height: 32px;
+  border-radius: 999px;
+  border: 3px solid rgba(148,163,184,0.35);
+  border-top-color: var(--accent);
+  animation: loading-spin 0.7s linear infinite;
+  box-shadow: 0 0 20px rgba(15,23,42,0.9);
+}
+
+.loading-text {
+  font-size: 11px;
+  color: var(--text-muted);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
+
+@keyframes loading-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+
 
     .calendar-header {
       display: flex;
@@ -877,7 +927,11 @@
 <div class="app-shell">
   <header class="app-header">
     <div class="app-header-left">
-      <div class="logo-dot"></div>
+      <div><svg width="30" height="33" viewBox="0 0 120 134" fill="none" xmlns="http://www.w3.org/2000/svg">
+<path d="M15.7896 1.41331C8.75758 -2.62259 0 2.46622 0 10.5882V30.7282C0 34.5898 2.10049 38.1442 5.47915 39.9999L39.0112 58.4174C42.2015 60.1697 46.0675 60.1505 49.2404 58.3668L66.2388 48.8104C73.3863 44.792 73.4319 34.496 66.3201 30.4143L15.7896 1.41331Z" fill="#DBD8DE"></path>
+<path d="M0.195481 123.411C0.19478 131.533 8.95192 136.622 15.9843 132.587L33.6671 122.44C37.0114 120.521 39.0455 116.927 38.9726 113.065L38.9726 75.5C38.9032 71.814 36.2082 68.0795 33.0323 66.2198L16.0695 56.2871C9.03786 52.1697 0.201193 57.2526 0.200489 65.4151L0.195481 123.411Z" fill="#DBD8DE"></path>
+<path d="M114.692 75.9891C121.769 71.9289 121.77 61.6989 114.693 57.638L97.142 47.5672C93.8344 45.6692 89.7625 45.7073 86.4908 47.6668L53.6769 67.3197C50.5191 69.211 48.5725 72.6145 48.5398 76.3015L48.3676 95.7123C48.2952 103.875 57.087 109.037 64.1552 104.982L114.692 75.9891Z" fill="#DBD8DE"></path>
+</svg></div>
       <div class="app-title">
         <div class="app-title-main">Tournament Calendar</div>
         <div class="app-title-sub">Месяц + Гант (месяц/год) + фильтр</div>
@@ -889,6 +943,12 @@
   </header>
 
   <section class="calendar-card">
+    <div id="loadingOverlay" class="loading-overlay">
+  <div class="loading-inner">
+    <div class="loading-spinner"></div>
+    <div class="loading-text">Загружаю турниры…</div>
+  </div>
+</div>
     <div class="calendar-header">
       <div class="month-caption">
         <div class="month-name" id="monthLabel"></div>
@@ -1082,11 +1142,20 @@
 </div>
 
 <script>
-  // === URL веб-аппа Apps Script (doGet/doPost) ===
-  const SHEET_API_URL =
-    "https://script.google.com/macros/s/AKfycbwsJfeVy1umIemb6_VyxuOYd-KaH5chczuNq4n_uvXtKRQ6OBPeqyHTTGnwCqXIMxE0tA/exec";
+  // URL, который отдаёт JSON со списком событий (echo)
+const EVENTS_URL = "https://event-calendar-api.valkirvideo.workers.dev/events";
+
+// URL веб-приложения Apps Script (тот самый /exec)
+const API_URL = "https://event-calendar-api.valkirvideo.workers.dev/api";
+
 
   let eventsFromTable = [];
+
+  const loadingOverlayEl = document.getElementById("loadingOverlay");
+  function setLoading(isLoading) {
+    if (!loadingOverlayEl) return;
+    loadingOverlayEl.classList.toggle("loading-overlay--hidden", !isLoading);
+  }
 
   const monthNamesRu = [
     "Январь","Февраль","Март","Апрель","Май","Июнь",
@@ -1135,40 +1204,87 @@
     return "disc-other";
   }
 
-  // === Загрузка событий с бэка (GET, публично) ===
-  async function loadEventsFromSheet() {
-    try {
-      const url = SHEET_API_URL + "?t=" + Date.now();
-      const res = await fetch(url);
-      const text = await res.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (err) {
-        console.error("Не получилось распарсить JSON от Apps Script:", err, text);
-        return;
-      }
+  const EVENTS_CACHE_KEY = "calendarEventsCache_v1";
+const EVENTS_CACHE_TTL_MS = 5 * 60 * 1000; // 5 минут
 
-      if (!data || !data.ok || !Array.isArray(data.events)) {
-        console.error("Некорректный ответ от doGet:", data);
-        return;
-      }
+function loadEventsFromCache() {
+  try {
+    const raw = localStorage.getItem(EVENTS_CACHE_KEY);
+    if (!raw) return false;
+    const { ts, events } = JSON.parse(raw);
+    if (!Array.isArray(events)) return false;
+    if (Date.now() - ts > EVENTS_CACHE_TTL_MS) return false;
 
-      eventsFromTable = data.events.map(ev => ({
-        rowIndex:   ev.rowIndex,
-        title:      ev.title || "",
-        discipline: ev.discipline || "",
-        startDate:  ev.startDate,
-        endDate:    ev.endDate,
-        location:   ev.location || "",
-        comment:    ev.comment || ""
-      }));
-
-      renderCalendar();
-    } catch (e) {
-      console.error("Ошибка загрузки событий:", e);
-    }
+    eventsFromTable = events;
+    renderCalendar();
+    return true;
+  } catch (e) {
+    console.warn("Не удалось прочитать кэш событий:", e);
+    return false;
   }
+}
+
+function saveEventsToCache(events) {
+  try {
+    localStorage.setItem(
+      EVENTS_CACHE_KEY,
+      JSON.stringify({ ts: Date.now(), events })
+    );
+  } catch (e) {
+    console.warn("Не удалось сохранить кэш событий:", e);
+  }
+}
+
+
+  // === Загрузка событий с бэка (GET, публично) ===
+// === Загрузка событий с бэка (GET, публично) ===
+async function loadEventsFromSheet() {
+  setLoading(true);
+  try {
+    const urlObj = new URL(EVENTS_URL);
+
+    // Чтобы кэш не мешал
+    urlObj.searchParams.set("t", Date.now().toString());
+
+    // Если пользователь залогинен (admin или client) — отправляем token.
+    if (authToken) {
+      urlObj.searchParams.set("token", authToken);
+    }
+
+    const res = await fetch(urlObj.toString(), { method: "GET" });
+    const text = await res.text();
+
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch (err) {
+      console.error("Ответ не JSON, пришёл HTML/ошибка:", err);
+      console.error(text.slice(0, 300));
+      return;
+    }
+
+    if (!data || !data.ok || !Array.isArray(data.events)) {
+      console.error("Некорректный ответ:", data);
+      return;
+    }
+
+    eventsFromTable = data.events.map(ev => ({
+      rowIndex:   ev.rowIndex,
+      title:      ev.title || "",
+      discipline: ev.discipline || "",
+      startDate:  ev.startDate,
+      endDate:    ev.endDate,
+      location:   ev.location || "",
+      comment:    ev.comment || ""
+    }));
+
+    renderCalendar();
+  } catch (e) {
+    console.error("Ошибка загрузки событий:", e);
+  } finally {
+    setLoading(false);
+  }
+}
 
   const today = new Date();
   let currentYear  = today.getFullYear();
@@ -1327,45 +1443,53 @@
 
   // === Аутентификация на фронте ===
   let authToken = localStorage.getItem("calendarAuthToken") || null;
-  let isAdmin = !!authToken;
+  let userRole  = localStorage.getItem("calendarUserRole") || null; // 'admin' / 'client' / null
+  let isAdmin   = (userRole === "admin"); 
 
   function updateAdminUI() {
-    if (!adminActionBtn) return;
-    if (isAdmin) {
-      adminActionBtn.textContent = "Добавить событие";
-    } else {
-      adminActionBtn.textContent = "Вход в админку";
-    }
+  if (!adminActionBtn) return;
+
+  if (userRole === "admin") {
+    adminActionBtn.textContent = "Добавить событие";
+  } else if (userRole === "client") {
+    adminActionBtn.textContent = "Project D (только просмотр)";
+  } else {
+    adminActionBtn.textContent = "Вход";
   }
+}
 
   function handleUnauthorized() {
-    authToken = null;
-    isAdmin = false;
-    localStorage.removeItem("calendarAuthToken");
-    updateAdminUI();
-    openLoginModal("Сессия истекла. Войдите заново.");
-  }
+  authToken = null;
+  userRole  = null;
+  isAdmin   = false;
+  localStorage.removeItem("calendarAuthToken");
+  localStorage.removeItem("calendarUserRole");
+  updateAdminUI();
+  openLoginModal("Сессия истекла. Войдите заново.");
+}
 
   async function performLogin(login, password) {
-    const payload = {
-      action: "login",
-      login,
-      password
-    };
-    const res = await fetch(SHEET_API_URL, {
-      method: "POST",
-      headers: { "Content-Type": "text/plain" },
-      body: JSON.stringify(payload)
-    });
-    const text = await res.text();
-    let data;
-    try {
-      data = JSON.parse(text);
-    } catch (err) {
-      throw new Error("Некорректный ответ сервера");
-    }
-    return data;
+  const payload = {
+    action: "login",
+    login,
+    password
+  };
+
+  const res = await fetch(API_URL, {
+    method: "POST",
+    headers: { "Content-Type": "text/plain" },
+    body: JSON.stringify(payload)
+  });
+
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch (err) {
+    throw new Error("Некорректный ответ сервера при логине (не JSON).");
   }
+  return data;
+}
 
   loginFormEl.addEventListener("submit", async (e) => {
     e.preventDefault();
@@ -1382,15 +1506,23 @@
     loginSubmitBtn.disabled = true;
     try {
       const data = await performLogin(login, password);
-      if (!data.ok) {
-        setLoginError(data.error || "Неверный логин или пароль.");
-        return;
-      }
-      authToken = data.token;
-      isAdmin = true;
-      localStorage.setItem("calendarAuthToken", authToken);
-      updateAdminUI();
-      closeLoginModal();
+    if (!data.ok) {
+      setLoginError(data.error || "Неверный логин или пароль.");
+      return;
+    }
+    authToken = data.token;
+    userRole  = data.role || "admin"; // по умолчанию admin, если что-то пойдёт не так
+    isAdmin   = (userRole === "admin");
+
+    localStorage.setItem("calendarAuthToken", authToken);
+    localStorage.setItem("calendarUserRole",  userRole);
+
+    updateAdminUI();
+    closeLoginModal();
+
+    // После логина перезагружаем события, чтобы появились Project D
+    loadEventsFromSheet();
+
     } catch (err) {
       setLoginError("Ошибка: " + err.message);
     } finally {
@@ -1408,32 +1540,37 @@
 
   // === Синхронизация событий с бэком (create/update/delete, только для админа) ===
   async function syncEventWithSheet(payloadBase) {
-    const payload = Object.assign({}, payloadBase, {
-      token: authToken || undefined
+  const payload = Object.assign({}, payloadBase, {
+    token: authToken || undefined
+  });
+
+  try {
+    const res = await fetch(API_URL, {
+      method: "POST",
+      headers: { "Content-Type": "text/plain" },
+      body: JSON.stringify(payload)
     });
+
+    const text = await res.text();
+    let data;
     try {
-      const res = await fetch(SHEET_API_URL, {
-        method: "POST",
-        headers: { "Content-Type": "text/plain" },
-        body: JSON.stringify(payload)
-      });
-      const text = await res.text();
-      let data;
-      try {
-        data = JSON.parse(text);
-      } catch (err) {
-        return { ok: false, error: "Некорректный ответ сервера" };
-      }
-
-      if (!data.ok && data.error === "UNAUTHORIZED") {
-        handleUnauthorized();
-      }
-
-      return data;
+      data = JSON.parse(text);
     } catch (err) {
-      return { ok: false, error: "Ошибка сети: " + (err && err.message ? err.message : String(err)) };
+      return { ok: false, error: "Некорректный ответ сервера (не JSON)" };
     }
+
+    if (!data.ok && data.error === "UNAUTHORIZED") {
+      handleUnauthorized();
+    }
+
+    return data;
+  } catch (err) {
+    return {
+      ok: false,
+      error: "Ошибка сети: " + (err && err.message ? err.message : String(err))
+    };
   }
+}
 
   function collectFormEventData(){
     return {
@@ -2442,8 +2579,15 @@
 
   // старт
   updateAdminUI();
-  applyGanttDayWidth();
-  loadEventsFromSheet();
+applyGanttDayWidth();
+
+const hadCache = loadEventsFromCache();
+if (!hadCache) {
+  // хотя бы сетка месяца и пустые дни, чтобы не было ощущения "тупняка"
+  renderCalendar();
+}
+
+loadEventsFromSheet();
 </script>
 </body>
 </html>
